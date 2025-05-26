@@ -33,7 +33,7 @@ func validateJ1587Checksum(frame []byte) bool {
 // getPIDDataLength возвращает длину данных для заданного PID согласно SAE J1587
 func getPIDDataLength(pid byte, data []byte, offset int) (int, error) {
 	switch {
-	case pid >= 0 && pid <= 127:
+	case pid <= 127:
 		// PID 0-127: 1 байт данных
 		return 1, nil
 	case pid >= 128 && pid <= 191:
