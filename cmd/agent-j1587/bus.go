@@ -40,7 +40,7 @@ func NewBus(port *serial.Port) (*Bus, error) {
 
 	return &Bus{
 		port:     port,
-		data:     &J1587Data{}, // Инициализируем пустую структуру J1587Data
+		data:     NewJ1587Data(), // Инициализируем пустую структуру J1587Data
 		frames:   make(chan []byte),
 		stopChan: make(chan struct{}),
 		dtcChan:  make(chan common.DTCCode, 10), // Буферизированный канал для DTC
@@ -103,13 +103,7 @@ func (p *Bus) SendFrame(mid byte, pid byte, data []byte) error {
 		return fmt.Errorf("протокол J1587 не запущен, отправка команды невозможна")
 	}
 
-	// Формируем фрейм: MID, PID, Data, Checksum
-	// Для простоты, чек-сумму здесь не рассчитываем, т.к. ее расчет зависит от полной длины сообщения,
-	// а J1587 фреймы обычно не имеют чек-суммы на уровне отдельных PID-сообщений,
-	// а скорее на уровне всего сообщения (если оно длинное и разбито на пакеты).
-	// Простое сообщение PID обычно состоит из MID, PID, DATA.
-	// Важно: Убедитесь, что ваше оборудование не требует специфичного формата или чек-суммы для команд.
-
+	// Формируем фрейм: MID, PID, Data
 	var frame []byte
 	frame = append(frame, mid)
 	frame = append(frame, pid)
@@ -117,19 +111,12 @@ func (p *Bus) SendFrame(mid byte, pid byte, data []byte) error {
 		frame = append(frame, data...)
 	}
 
-	// J1587 требует контрольную сумму для сообщений длиннее одного байта (не считая MID).
-	// Контрольная сумма - это младший байт суммы всех байтов сообщения (включая MID).
-	// Однако, для командных PID, формат может быть проще и не всегда требовать явной КС в данных,
-	// так как само сообщение короткое.
-	// Для примера, мы не будем добавлять КС в тело `data`, предполагая, что это простое командное сообщение.
-	// Если КС нужна, она должна быть рассчитана и добавлена в `data` или как последний байт `frame`.
+	// Рассчитываем и добавляем контрольную сумму согласно SAE J1587
+	checksum := calculateJ1587Checksum(frame)
+	frameWithChecksum := append(frame, checksum)
 
-	// Расчет чек-суммы для J1587 (если требуется для команды)
-	// checksum := calculateJ1587Checksum(frame)
-	// frameWithChecksum := append(frame, checksum)
-
-	log.Printf("J1587 SENDING FRAME: MID=%d PID=%d DATA=% X", mid, pid, data)
-	_, err := p.port.Write(frame)
+	log.Printf("J1587 SENDING FRAME: MID=%d PID=%d DATA=% X CHECKSUM=%d", mid, pid, data, checksum)
+	_, err := p.port.Write(frameWithChecksum)
 	if err != nil {
 		return fmt.Errorf("ошибка отправки J1587 команды: %v", err)
 	}

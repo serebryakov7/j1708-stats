@@ -8,25 +8,114 @@ import (
 	"github.com/serebryakov7/j1708-stats/common"
 )
 
-// parseFrame разбирает фрейм J1587
+// calculateJ1587Checksum вычисляет контрольную сумму для J1587 фрейма
+func calculateJ1587Checksum(frame []byte) byte {
+	sum := 0
+	for _, b := range frame {
+		sum += int(b)
+	}
+	return byte(256 - (sum % 256))
+}
+
+// validateJ1587Checksum проверяет контрольную сумму J1587 фрейма
+func validateJ1587Checksum(frame []byte) bool {
+	if len(frame) < 3 { // MID + минимум 1 PID + checksum
+		return false
+	}
+
+	sum := 0
+	for _, b := range frame {
+		sum += int(b)
+	}
+	return (sum % 256) == 0
+}
+
+// getPIDDataLength возвращает длину данных для заданного PID согласно SAE J1587
+func getPIDDataLength(pid byte, data []byte, offset int) (int, error) {
+	switch {
+	case pid >= 0 && pid <= 127:
+		// PID 0-127: 1 байт данных
+		return 1, nil
+	case pid >= 128 && pid <= 191:
+		// PID 128-191: 2 байта данных
+		return 2, nil
+	case pid >= 192 && pid <= 253:
+		// PID 192-253: переменная длина, следующий байт указывает количество байт данных
+		if offset >= len(data) {
+			return 0, fmt.Errorf("недостаточно данных для чтения длины переменного PID %d", pid)
+		}
+		dataLength := int(data[offset])
+		return dataLength, nil
+	default:
+		return 0, fmt.Errorf("недопустимый PID: %d", pid)
+	}
+}
+
+// parseFrame разбирает фрейм J1587 с поддержкой нескольких PID/Data блоков
 func (p *Bus) parseFrame(frame []byte) {
-	if len(frame) < 2 {
+	if len(frame) < 3 { // MID + минимум 1 PID + 1 байт данных или checksum
+		log.Printf("J1587: фрейм слишком короткий: %d байт", len(frame))
+		return
+	}
+
+	// Проверяем контрольную сумму
+	if !validateJ1587Checksum(frame) {
+		log.Printf("J1587: неверная контрольная сумма для фрейма: % X", frame)
 		return
 	}
 
 	mid := int(frame[0])
-	data := frame[1:]
+	data := frame[1 : len(frame)-1] // Исключаем последний байт (checksum)
 
-	if len(data) == 0 {
-		return
+	log.Printf("J1587: парсинг фрейма MID=%d, данные=% X", mid, data)
+
+	// Парсим все PID/Data блоки в фрейме
+	offset := 0
+	for offset < len(data) {
+		if offset >= len(data) {
+			break
+		}
+
+		pid := data[offset]
+		offset++
+
+		// Определяем длину данных для этого PID
+		dataLength, err := getPIDDataLength(pid, data, offset)
+		if err != nil {
+			log.Printf("J1587: ошибка определения длины данных для PID %d: %v", pid, err)
+			break
+		}
+
+		// Для переменной длины (PID 192-253) нужно прочитать байт длины
+		if pid >= 192 && pid <= 253 {
+			if offset >= len(data) {
+				log.Printf("J1587: недостаточно данных для чтения длины PID %d", pid)
+				break
+			}
+			dataLength = int(data[offset])
+			offset++
+		}
+
+		// Проверяем, что у нас достаточно данных
+		if offset+dataLength > len(data) {
+			log.Printf("J1587: недостаточно данных для PID %d: нужно %d байт, доступно %d",
+				pid, dataLength, len(data)-offset)
+			break
+		}
+
+		// Извлекаем данные для этого PID
+		paramData := data[offset : offset+dataLength]
+		offset += dataLength
+
+		log.Printf("J1587: обработка PID=%d, данные=% X", pid, paramData)
+
+		// Обрабатываем конкретный PID
+		p.processPIDData(mid, int(pid), paramData)
 	}
+}
 
-	pid := int(data[0])
-	paramData := data[1:]
-
-	// Мьютекс теперь управляется внутри методов Set/Get ProtectedData (J1587Data)
-	// p.data.mutex.Lock() и defer p.data.mutex.Unlock() здесь больше не нужны.
-
+// processPIDData обрабатывает данные для конкретного PID
+func (p *Bus) processPIDData(mid int, pid int, paramData []byte) {
 	// Парсинг различных параметров по их PID
 	switch pid {
 	case PID_VEHICLE_SPEED:
@@ -105,7 +194,7 @@ func (p *Bus) parseFrame(frame []byte) {
 		}
 
 	default:
-		// log.Printf("Неизвестный PID: %d для MID: %d", pid, mid)
+		log.Printf("J1587: неизвестный PID: %d для MID: %d", pid, mid)
 	}
 }
 
@@ -116,15 +205,13 @@ func (p *Bus) processFrames() {
 		case <-p.stopChan:
 			return
 		case frame := <-p.frames:
-			if len(frame) < 1 {
+			if len(frame) < 3 { // MID + минимум 1 PID + checksum
+				log.Printf("J1587: получен слишком короткий фрейм: %d байт", len(frame))
 				continue
 			}
 
-			mid := frame[0]
-			data := frame[1:]
-
 			// Выводим фрейм для отладки
-			fmt.Printf("J1587 FRAME: MID=%d DATA=% X\n", mid, data)
+			log.Printf("J1587 FRAME: % X", frame)
 
 			// Парсим фрейм J1587
 			p.parseFrame(frame)
